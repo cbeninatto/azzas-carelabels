@@ -1,11 +1,12 @@
 import re
+import base64
 from pathlib import Path
 
 import streamlit as st
 
-# ---------- BASIC CONFIG ----------
+# ---------------- BASIC CONFIG ----------------
 st.set_page_config(
-    page_title="Carelabel Generator",
+    page_title="Carelabel & SKU Label Generator",
     layout="wide",
 )
 
@@ -20,13 +21,32 @@ BRAND_LOGOS = {
 
 CARE_ICONS_PATH = ASSETS_DIR / "carelabel_icons.png"
 
+BRAND_WEBSITES = {
+    # adjust if needed
+    "Anacapri": "ANACAPRI.COM.BR",
+    "Arezzo": "AREZZO.COM.BR",
+    "Schutz": "SCHUTZ.COM.BR",
+    "Reserva": "RESERVA.COM.BR",
+}
 
-# ---------- TRANSLATION LOGIC ----------
+
+# ---------------- HELPERS ----------------
+
+def load_image_base64(path: Path):
+    if not path.exists():
+        return None
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+BRAND_LOGOS_B64 = {name: load_image_base64(p) for name, p in BRAND_LOGOS.items()}
+CARE_ICONS_B64 = load_image_base64(CARE_ICONS_PATH)
+
 
 def translate_composition_to_pt(text: str) -> str:
     """
-    Very simple rule-based translator for handbag compositions.
-    You can extend this dictionary as needed.
+    Simple rule-based translator for handbag compositions EN -> PT-BR.
+    Extend the replacements list as needed.
     """
     if not text:
         return ""
@@ -34,7 +54,7 @@ def translate_composition_to_pt(text: str) -> str:
     result = text.strip()
 
     replacements = [
-        # order matters: more specific patterns first
+        # more specific patterns first
         (r"polyvinyl chloride\s*\(?\s*pvc\s*\)?", "POLICLORETO DE VINILA (PVC)"),
         (r"\bpvc\b", "POLICLORETO DE VINILA (PVC)"),
         (r"polyurethane", "POLIURETANO (PU)"),
@@ -52,14 +72,12 @@ def translate_composition_to_pt(text: str) -> str:
     for pattern, repl in replacements:
         result = re.sub(pattern, repl, result, flags=re.IGNORECASE)
 
-    # final style: uppercase everything (numbers/percentages stay the same)
     return result.upper()
 
 
 def build_carelabel_text(exterior_pt: str, forro_pt: str) -> str:
     """
-    Returns the full Portuguese text block for the carelabel.
-    Only EXTERIOR and FORRO are dynamic.
+    Fixed carelabel text with dynamic EXTERIOR / FORRO.
     """
     text = f"""IMPORTADO POR BTG PACTUAL
 COMMODITIES SERTRADING S.A
@@ -83,29 +101,74 @@ LIMPAR COM PANO SECO"""
     return text
 
 
-def label_box_html(inner_text: str) -> str:
+def label_box_html(full_text: str, brand: str) -> str:
     """
-    Simple HTML/CSS block that simulates an 80x30mm label in preview.
+    HTML that simulates the 80x30mm carelabel layout similar to your mockup:
+    - Thin border
+    - Logo area at top (we'll use the brand name + optional logo)
+    - Body text
+    - Care icons at the bottom
     """
+    brand_upper = brand.upper()
+    website = BRAND_WEBSITES.get(brand, f"{brand_upper}.COM.BR")
+
+    logo_b64 = BRAND_LOGOS_B64.get(brand)
+    logo_html = (
+        f'<img src="data:image/png;base64,{logo_b64}" '
+        f'style="max-width:140px; margin-bottom:4px;" />'
+        if logo_b64
+        else ""
+    )
+
+    icons_html = (
+        f'<img src="data:image/png;base64,{CARE_ICONS_B64}" '
+        f'style="width:100%; margin-top:10px;" />'
+        if CARE_ICONS_B64
+        else ""
+    )
+
     return f"""
     <div style="
         border:1px solid #000;
-        padding:6px 10px;
-        width:380px;
-        min-height:140px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        font-size:11px;
-        line-height:1.3;
-        white-space:pre-wrap;
+        padding:8px 10px;
+        width:260px;
+        min-height:520px;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         ">
-        {inner_text}
+        <div style="text-align:center; margin-bottom:10px;">
+            {logo_html}
+            <div style="
+                font-size:24px;
+                font-weight:700;
+                letter-spacing:3px;
+                margin-top:2px;">
+                {brand_upper}
+            </div>
+            <div style="
+                font-size:10px;
+                font-weight:700;
+                margin-top:2px;">
+                {website}
+            </div>
+        </div>
+        <div style="
+            font-size:9px;
+            line-height:1.35;
+            white-space:pre-wrap;
+            ">
+            {full_text}
+        </div>
+        <div style="margin-top:8px; text-align:center;">
+            {icons_html}
+        </div>
     </div>
     """
 
 
 def sku_label_html(sku: str) -> str:
     """
-    Simple HTML/CSS block that simulates a 10x50mm SKU label with centered SKU.
+    HTML that simulates the 10x50mm SKU label:
+    border, SKU centered, similar to your example.
     """
     return f"""
     <div style="
@@ -115,9 +178,8 @@ def sku_label_html(sku: str) -> str:
         display:flex;
         align-items:center;
         justify-content:center;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        font-size:18px;
-        font-weight:600;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+        font-size:20px;
         letter-spacing:2px;
         ">
         {sku}
@@ -125,40 +187,45 @@ def sku_label_html(sku: str) -> str:
     """
 
 
-# ---------- SIDEBAR: GLOBAL OPTIONS ----------
+# ---------------- SIDEBAR ----------------
 st.sidebar.title("Carelabel Generator")
 
 brand = st.sidebar.selectbox("Brand", list(BRAND_LOGOS.keys()))
-label_type = st.sidebar.radio(
-    "Label type",
-    ["Carelabel (80x30mm)", "SKU label (10x50mm)"],
-)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("This is an internal tool draft. Update the mapping in `translate_composition_to_pt()` as needed.")
+st.sidebar.caption(
+    "Use the Carelabel tab for the family composition and the SKU tab "
+    "to list all SKUs that share this carelabel."
+)
 
 
-# ---------- MAIN LAYOUT ----------
+# ---------------- MAIN LAYOUT ----------------
 st.title("Carelabel & SKU Label Generator")
 
-col_inputs, col_preview = st.columns([1.1, 1.3])
+tab_care, tab_sku = st.tabs(["Carelabel (80×30 mm)", "SKU labels (10×50 mm)"])
+
 
 # ---------- CARELABEL TAB ----------
-if label_type.startswith("Carelabel"):
-    with col_inputs:
-        st.subheader("Carelabel – Input")
+with tab_care:
+    col_left, col_right = st.columns([1.1, 1.3])
 
-        st.write("### Composition (English)")
-        st.write("Only *EXTERIOR* and *FORRO* will be translated and injected into the label.")
+    with col_left:
+        st.subheader("Carelabel – Composition")
 
-        exterior_en = st.text_input(
-            "EXTERIOR (English composition)",
-            value="100% PVC",
-            help="Example: '60% PVC 40% Polyester'",
+        family_code = st.text_input(
+            "Product family (optional)",
+            value="",
+            help="e.g. C500390016 – all colors/SKUs in this family share the same carelabel.",
         )
 
+        st.write("### Composition (English or Portuguese)")
+        exterior_en = st.text_input(
+            "EXTERIOR",
+            value="100% PVC",
+            help="Example: '75% Polyester, 25% Polyvinyl Chloride (PVC)'",
+        )
         forro_en = st.text_input(
-            "FORRO / LINING (English composition)",
+            "FORRO / LINING",
             value="100% Polyester",
             help="Example: '100% Polyester'",
         )
@@ -168,24 +235,19 @@ if label_type.startswith("Carelabel"):
             value=False,
         )
 
-        sku_optional = st.text_input(
-            "Optional SKU (used for file name only)",
-            value="",
+        st.markdown("—")
+        file_base_name = st.text_input(
+            "Base file name (optional)",
+            value=family_code or "",
+            help="Used only for the .txt file name. Example: C500390016",
         )
 
-        generate = st.button("Generate carelabel")
+        generate_care = st.button("Generate carelabel")
 
-    with col_preview:
-        st.subheader("Preview")
+    with col_right:
+        st.subheader("Carelabel Preview")
 
-        # logo preview
-        logo_path = BRAND_LOGOS.get(brand)
-        if logo_path and logo_path.exists():
-            st.image(str(logo_path), caption=f"Logo – {brand}", use_column_width=False)
-        else:
-            st.warning(f"Logo file not found for brand '{brand}'. Check assets folder.")
-
-        if generate:
+        if generate_care:
             if already_pt:
                 exterior_pt = exterior_en.strip().upper()
                 forro_pt = forro_en.strip().upper()
@@ -195,58 +257,75 @@ if label_type.startswith("Carelabel"):
 
             full_text = build_carelabel_text(exterior_pt, forro_pt)
 
-            # label box
-            st.markdown(label_box_html(full_text), unsafe_allow_html=True)
-
-            # care icons
-            if CARE_ICONS_PATH.exists():
-                st.image(str(CARE_ICONS_PATH), use_column_width=True, caption="Wash instruction icons")
-            else:
-                st.warning("Carelabel icons image not found. Add it to assets as 'carelabel_icons.png'.")
+            st.markdown(
+                label_box_html(full_text, brand),
+                unsafe_allow_html=True,
+            )
 
             # download text
-            filename_sku = sku_optional.strip().replace(" ", "_") or "carelabel"
+            base_name = file_base_name.strip() or "carelabel"
             st.download_button(
-                label="Download label text (.txt)",
+                "Download carelabel text (.txt)",
                 data=full_text,
-                file_name=f"{filename_sku}_carelabel.txt",
+                file_name=f"{base_name}_carelabel.txt",
                 mime="text/plain",
             )
         else:
-            st.info("Fill the compositions and click **Generate carelabel** to see the preview.")
+            st.info("Preencha a composição e clique em **Generate carelabel**.")
 
 
-# ---------- SKU LABEL TAB ----------
-else:
-    with col_inputs:
-        st.subheader("SKU label – Input")
+# ---------- SKU LABELS TAB ----------
+with tab_sku:
+    if "sku_count" not in st.session_state:
+        st.session_state["sku_count"] = 4  # start with 4 SKUs
 
-        sku_code = st.text_input(
-            "SKU (central text on label)",
-            value="C40008 0001 0001",
+    col_left, col_right = st.columns([1.1, 1.5])
+
+    with col_left:
+        st.subheader("SKUs for this family")
+
+        st.caption(
+            "Exemplo: família **C500390016** com 4 cores → "
+            "C5003900160001, C5003900160002, C5003900160003, C5003900160004."
         )
 
-        st.caption("For this project the SKU label is 10x50mm with only the SKU centered.")
+        # optional hint from family code typed on carelabel tab
+        if family_code := st.session_state.get("family_code", ""):
+            st.write(f"Família atual (opcional): **{family_code}**")
 
-        generate_sku = st.button("Generate SKU label")
+        if st.button("Add another SKU field"):
+            st.session_state["sku_count"] += 1
 
-    with col_preview:
-        st.subheader("Preview")
+        sku_values = []
+        for i in range(st.session_state["sku_count"]):
+            sku_val = st.text_input(
+                f"SKU {i + 1}",
+                key=f"sku_{i+1}",
+                placeholder="Ex.: C5003900160001",
+            )
+            if sku_val.strip():
+                sku_values.append(sku_val.strip())
 
-        logo_path = BRAND_LOGOS.get(brand)
-        if logo_path and logo_path.exists():
-            st.image(str(logo_path), caption=f"Logo – {brand}", use_column_width=False)
-        else:
-            st.warning(f"Logo file not found for brand '{brand}'. Check assets folder.")
+        generate_skus = st.button("Generate SKU labels")
 
-        if generate_sku:
-            st.markdown(sku_label_html(sku_code), unsafe_allow_html=True)
+    with col_right:
+        st.subheader("SKU Label Previews")
 
+        if generate_skus and sku_values:
+            for sku in sku_values:
+                st.markdown(sku_label_html(sku), unsafe_allow_html=True)
+                st.write("")
+
+            # text file with one SKU per line (useful for ZPL / printing later)
+            skus_text = "\n".join(sku_values)
             st.download_button(
-                label="Download SKU text (.txt)",
-                data=sku_code.strip(),
-                file_name=f"sku_label_{sku_code.strip().replace(' ', '_')}.txt",
+                "Download SKU list (.txt)",
+                data=skus_text,
+                file_name="sku_list.txt",
                 mime="text/plain",
             )
         else:
-            st.info("Type the SKU and click **Generate SKU label** to see the preview.")
+            st.info(
+                "Digite os SKUs (pelo menos um) e clique em **Generate SKU labels** "
+                "para visualizar as etiquetas."
+            )
