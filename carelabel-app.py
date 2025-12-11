@@ -7,6 +7,7 @@ import streamlit as st
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 
 # ---------------- BASIC CONFIG ----------------
@@ -100,16 +101,47 @@ LIMPAR COM PANO SECO"""
     return text
 
 
+# ---------------- WORD WRAPPING ----------------
+
+def wrap_line(text: str, max_width: float, font_name: str = "Helvetica", font_size: float = 5.0):
+    """
+    Wrap a single logical line into multiple lines so that each
+    is <= max_width in points.
+    """
+    if not text:
+        return [""]
+
+    words = text.split()
+    lines = []
+    current = ""
+
+    for w in words:
+        if not current:
+            current = w
+            continue
+        candidate = current + " " + w
+        if stringWidth(candidate, font_name, font_size) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = w
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
 # ---------------- PDF GENERATION ----------------
 
 def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
     """
     Single-page carelabel PDF:
 
-    • Physical size: 30 x 80 mm (W x H)
-    • Logo centered at the top in a fixed band
-    • Text block with font size tuned to match reference
-    • Care icons at the bottom with fixed visual size
+    • Physical size: 30 x 80 mm (W x H) – same as your example.
+    • Top band (~10 mm) reserved for logo (image only).
+    • Bottom band (~8 mm) reserved for care icons.
+    • Middle: text at ~5 pt with manual wrapping so nothing is truncated.
     """
 
     # Page size (80 x 30 mm carelabel, vertical)
@@ -119,7 +151,7 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=(width, height))
 
-    # Outer border
+    # Border
     border_margin = 0.5 * mm
     c.setLineWidth(0.5)
     c.rect(
@@ -131,21 +163,25 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
 
     inner_margin_x = 3 * mm
 
-    # Logo band (top)
-    top_margin = 3 * mm          # distance from top border
-    logo_max_height = 14 * mm    # height of logo band (tuned to sample)
-    logo_max_width = width - 2 * inner_margin_x
+    # Bands (in mm)
+    top_band_mm = 10     # logo + white space
+    icons_band_mm = 8    # icons + white space
 
+    # ---------- LOGO (TOP) ----------
     logo_path = BRAND_LOGOS.get(brand)
     if logo_path and logo_path.exists():
         logo_img = ImageReader(str(logo_path))
         iw, ih = logo_img.getSize()
+
+        logo_max_height = (top_band_mm - 2) * mm
+        logo_max_width = width - 2 * inner_margin_x
+
         scale = min(logo_max_width / iw, logo_max_height / ih)
         draw_w = iw * scale
         draw_h = ih * scale
 
         x_logo = (width - draw_w) / 2.0
-        y_logo = height - top_margin - draw_h
+        y_logo = height - border_margin - 1 * mm - draw_h
 
         c.drawImage(
             logo_img,
@@ -156,18 +192,13 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
             preserveAspectRatio=True,
             mask="auto",
         )
-        # Text starts a bit below the logo
-        text_top_y = y_logo - 2 * mm
-    else:
-        # If logo not found, reserve same band anyway
-        text_top_y = height - (top_margin + logo_max_height + 2 * mm)
 
-    # Care icons (bottom)
-    icons_bottom_margin = 3 * mm
-    icons_max_height = 7 * mm          # controls icon height (match sample feel)
-    icons_max_width = width - 8 * mm   # leaves some side margin
+    # ---------- ICONS (BOTTOM) ----------
+    icons_bottom_y = border_margin + 1 * mm
+    icons_max_height = (icons_band_mm - 2) * mm
+    icons_max_width = width - 2 * inner_margin_x
 
-    text_bottom_limit = icons_bottom_margin  # fallback if no icons
+    text_bottom_limit = icons_bottom_y + icons_max_height + 1 * mm  # text must stay above this
 
     if CARE_ICONS_PATH.exists():
         icons_img = ImageReader(str(CARE_ICONS_PATH))
@@ -177,7 +208,7 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
         draw_h_i = ih * scale_i
 
         x_icons = (width - draw_w_i) / 2.0
-        y_icons = icons_bottom_margin  # fixed distance from bottom border
+        y_icons = icons_bottom_y
 
         c.drawImage(
             icons_img,
@@ -189,28 +220,38 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
             mask="auto",
         )
 
-        # Text must stay above the icon band
-        text_bottom_limit = y_icons + draw_h_i + 2 * mm
+    # ---------- TEXT (MIDDLE) ----------
+    # Top Y for text band
+    text_top_y = height - border_margin - top_band_mm * mm
 
-    # Text block (middle)
-    font_size = 7          # tuned to look like your sample
-    leading = 8            # line spacing (points)
+    font_size = 5.0       # close to your reference
+    leading = 6.0         # line spacing in points
+    max_text_width = width - 2 * inner_margin_x
+
+    # Wrap every line to avoid truncation
+    wrapped_lines = []
+    for line in full_text.splitlines():
+        if not line.strip():
+            wrapped_lines.append("")  # keep blank line
+        else:
+            wrapped_lines.extend(wrap_line(line, max_text_width, "Helvetica", font_size))
 
     text_obj = c.beginText()
     text_obj.setFont("Helvetica", font_size)
     text_obj.setLeading(leading)
     text_obj.setTextOrigin(inner_margin_x, text_top_y)
 
-    for line in full_text.splitlines():
-        # Stop if we are about to overlap the icons
+    for line in wrapped_lines:
         if text_obj.getY() <= text_bottom_limit:
+            # If it ever gets here, we ran out of space (should not happen
+            # with these margins, but this is a safeguard).
             break
         text_obj.textLine(line)
 
     c.drawText(text_obj)
-
     c.showPage()
     c.save()
+
     pdf_bytes = buf.getvalue()
     buf.close()
     return pdf_bytes
