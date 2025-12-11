@@ -103,7 +103,7 @@ LIMPAR COM PANO SECO"""
 
 # ---------------- WORD WRAPPING ----------------
 
-def wrap_line(text: str, max_width: float, font_name: str = "Helvetica", font_size: float = 5.0):
+def wrap_line(text: str, max_width: float, font_name: str = "Helvetica", font_size: float = 4.0):
     """
     Wrap a single logical line into multiple lines so that each
     is <= max_width in points.
@@ -172,7 +172,7 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
 
     # Bands (inside safe zone)
     top_band_mm = 10.0      # logo band (below safe_top)
-    icons_band_mm = 8.0     # icons band (above safe_bottom)
+    icons_band_mm = 6.0     # icons band (above safe_bottom, now smaller)
 
     # ---------- LOGO (TOP, BELOW SAFE MARGIN) ----------
     logo_path = BRAND_LOGOS.get(brand)
@@ -180,7 +180,7 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
         logo_img = ImageReader(str(logo_path))
         iw, ih = logo_img.getSize()
 
-        logo_max_height = (top_band_mm - 2.0) * mm   # a bit of inner padding
+        logo_max_height = (top_band_mm - 2.0) * mm   # inner padding
         logo_max_width = width - 2 * inner_margin_x
 
         scale = min(logo_max_width / iw, logo_max_height / ih)
@@ -209,7 +209,7 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
         text_top_y = safe_top_y - (top_band_mm * mm)
 
     # ---------- ICONS (BOTTOM, ABOVE SAFE MARGIN) ----------
-    icons_max_height = (icons_band_mm - 2.0) * mm
+    icons_max_height = (icons_band_mm - 2.0) * mm     # smaller icons
     icons_max_width = width - 2 * inner_margin_x
 
     text_bottom_limit = safe_bottom_y + icons_band_mm * mm  # fallback if no icons
@@ -240,8 +240,8 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
         text_bottom_limit = y_icons + draw_h_i + 2.0 * mm
 
     # ---------- TEXT (MIDDLE, WRAPPED) ----------
-    font_size = 5.0
-    leading = 6.0
+    font_size = 4.0         # smaller text as requested
+    leading = 5.0           # line spacing in points
     max_text_width = width - 2 * inner_margin_x
 
     # Wrap each logical line so it fits in max_text_width
@@ -328,9 +328,10 @@ def carelabel_preview_html(full_text: str, brand: str) -> str:
         else ""
     )
 
+    # slightly smaller icons in preview as well
     icons_html = (
         f'<img src="data:image/png;base64,{icons_b64}" '
-        f'style="width:75%; max-height:60px; margin-top:8px;" />'
+        f'style="width:65%; max-height:40px; margin-top:8px;" />'
         if icons_b64
         else ""
     )
