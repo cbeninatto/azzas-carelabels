@@ -1,4 +1,5 @@
 import re
+import math
 import base64
 from io import BytesIO
 from pathlib import Path
@@ -44,42 +45,100 @@ CARE_ICONS_B64 = load_image_base64(CARE_ICONS_PATH)
 
 # ---------------- TRANSLATION / TEXT ----------------
 
-def translate_composition_to_pt(text: str) -> str:
-    """
-    Very simple EN -> PT-BR translator for compositions.
-    Extend as needed.
-    """
+REPLACEMENTS = [
+    (r"polyvinyl chloride\s*\(?\s*pvc\s*\)?", "POLICLORETO DE VINILA (PVC)"),
+    (r"\bpvc\b", "POLICLORETO DE VINILA (PVC)"),
+    (r"polyurethane", "POLIURETANO (PU)"),
+    (r"\bpu\b", "POLIURETANO (PU)"),
+    (r"polyester", "POLIÉSTER"),
+    (r"polyamide", "POLIAMIDA"),
+    (r"nylon", "POLIAMIDA"),
+    (r"cotton", "ALGODÃO"),
+    (r"filler", "ENCHIMENTO"),
+    (r"base fabric", "TECIDO BASE"),
+    (r"leather", "COURO"),
+    (r"metal", "METAL"),
+]
+
+
+def basic_translate_freeform(text: str) -> str:
     if not text:
         return ""
-
-    result = text.strip()
-
-    replacements = [
-        (r"polyvinyl chloride\s*\(?\s*pvc\s*\)?", "POLICLORETO DE VINILA (PVC)"),
-        (r"\bpvc\b", "POLICLORETO DE VINILA (PVC)"),
-        (r"polyurethane", "POLIURETANO (PU)"),
-        (r"\bpu\b", "POLIURETANO (PU)"),
-        (r"polyester", "POLIÉSTER"),
-        (r"polyamide", "POLIAMIDA"),
-        (r"nylon", "POLIAMIDA"),
-        (r"cotton", "ALGODÃO"),
-        (r"filler", "ENCHIMENTO"),
-        (r"base fabric", "TECIDO BASE"),
-        (r"leather", "COURO"),
-        (r"metal", "METAL"),
-    ]
-
-    for pattern, repl in replacements:
+    result = text
+    for pattern, repl in REPLACEMENTS:
         result = re.sub(pattern, repl, result, flags=re.IGNORECASE)
-
     return result.upper()
 
 
+def parse_components_for_normalization(text: str):
+    if not text:
+        return []
+
+    cleaned = text.replace("\n", " ")
+    cleaned = re.sub(r"%\s*", "% ", cleaned)
+
+    pattern = re.compile(
+        r"(\d+(?:\.\d+)?)\s*%\s*([A-Za-zÀ-ÖØ-öø-ÿ ()/\-]+?)(?=(\d+(?:\.\d+)?\s*%|$))"
+    )
+
+    components = []
+    for m in pattern.finditer(cleaned):
+        pct = float(m.group(1))
+        desc = m.group(2).strip()
+        components.append((pct, desc))
+    return components
+
+
+def normalize_and_translate_composition(text: str) -> str:
+    if not text:
+        return ""
+
+    components = parse_components_for_normalization(text)
+    if not components:
+        return basic_translate_freeform(text)
+
+    main_components = []
+    for pct, desc in components:
+        d = desc.lower()
+        if "filler" in d or "base fabric" in d or "enchimento" in d or "tecido base" in d:
+            continue
+        main_components.append((pct, desc))
+
+    if not main_components:
+        return basic_translate_freeform(text)
+
+    total = sum(p for p, _ in main_components)
+    if total <= 0:
+        return basic_translate_freeform(text)
+
+    floats = [p * 100.0 / total for p, _ in main_components]
+    int_parts = [math.floor(f) for f in floats]
+    fracs = [f - i for f, i in zip(floats, int_parts)]
+
+    diff = 100 - sum(int_parts)
+    if diff > 0:
+        indices = sorted(range(len(fracs)), key=lambda i: fracs[i], reverse=True)
+        for i in indices[:diff]:
+            int_parts[i] += 1
+    elif diff < 0:
+        indices = sorted(range(len(fracs)), key=lambda i: fracs[i])
+        for i in indices[: -diff]:
+            int_parts[i] -= 1
+
+    parts_pt = []
+    for (_, desc), pct_int in zip(main_components, int_parts):
+        material_pt = basic_translate_freeform(desc)
+        parts_pt.append(f"{pct_int}% {material_pt}")
+
+    return " ".join(parts_pt)
+
+
+def translate_composition_to_pt(text: str) -> str:
+    return normalize_and_translate_composition(text)
+
+
 def build_carelabel_text(exterior_pt: str, forro_pt: str) -> str:
-    """
-    Fixed Portuguese body with dynamic EXTERIOR / FORRO.
-    """
-    text = f"""IMPORTADO POR BTG PACTUAL
+    return f"""IMPORTADO POR BTG PACTUAL
 COMMODITIES SERTRADING S.A
 CNPJ: 04.626.426/0007-00
 DISTRIBUIDO POR:
@@ -98,18 +157,14 @@ PROIBIDO LAVAR NA ÁGUA / NÃO ALVEJAR /
 PROIBIDO USAR SECADOR / NÃO PASSAR
 A FERRO / NÃO LAVAR A SECO /
 LIMPAR COM PANO SECO"""
-    return text
 
 
 # ---------------- WORD WRAPPING ----------------
 
 def wrap_line(text: str, max_width: float, font_name: str = "Helvetica", font_size: float = 4.0):
-    """
-    Wrap a single logical line into multiple lines so that each
-    is <= max_width in points.
-    """
     if not text:
         return [""]
+
     words = text.split()
     lines = []
     current = ""
@@ -134,53 +189,37 @@ def wrap_line(text: str, max_width: float, font_name: str = "Helvetica", font_si
 # ---------------- PDF GENERATION ----------------
 
 def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
-    """
-    Single-page carelabel PDF with extra safe margins at top and bottom
-    for folding and stitching.
-
-    • Physical size: 30 x 80 mm (W x H)
-    • Top safe margin: ~7 mm (no content)
-    • Bottom safe margin: ~7 mm (no content)
-    • Logo sits just below the top safe margin
-    • Care icons sit just above the bottom safe margin
-    • Text is wrapped AND vertically centered between logo and icons
-    • No border box
-    """
-
-    # Page size (80 x 30 mm carelabel, vertical)
-    width = 30 * mm   # width
-    height = 80 * mm  # height
+    width = 30 * mm
+    height = 80 * mm
 
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=(width, height))
 
     inner_margin_x = 3 * mm
 
-    # Safe zones (no content near edges – for fold/stitch)
-    stitch_margin_mm = 7.0  # bigger than before
+    # Safe margins (stitch/fold)
+    stitch_margin_mm = 7.0
     safe_top_y = height - stitch_margin_mm * mm
     safe_bottom_y = stitch_margin_mm * mm
 
-    # Bands (inside safe zone)
-    top_band_mm = 10.0      # logo band (below safe_top)
-    icons_band_mm = 6.0     # icons band (above safe_bottom)
+    top_band_mm = 10.0
+    icons_band_mm = 6.0
 
-    # ---------- LOGO (TOP, BELOW SAFE MARGIN) ----------
+    # Logo
     logo_path = BRAND_LOGOS.get(brand)
-    logo_bottom_y_for_text = safe_top_y - top_band_mm * mm  # default if no logo
+    logo_bottom_y_for_text = safe_top_y - top_band_mm * mm
 
     if logo_path and logo_path.exists():
         logo_img = ImageReader(str(logo_path))
         iw, ih = logo_img.getSize()
 
-        logo_max_height = (top_band_mm - 2.0) * mm   # inner padding
+        logo_max_height = (top_band_mm - 2.0) * mm
         logo_max_width = width - 2 * inner_margin_x
 
         scale = min(logo_max_width / iw, logo_max_height / ih)
         draw_w = iw * scale
         draw_h = ih * scale
 
-        # Reserva logo 1.5x taller (bounded by width)
         if brand == "Reserva":
             draw_w *= 1.5
             draw_h *= 1.5
@@ -189,7 +228,6 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
                 draw_w *= factor
                 draw_h *= factor
 
-        # Place logo so its top is slightly below the safe_top_y
         gap_from_safe_top = 1.0 * mm
         y_logo = safe_top_y - gap_from_safe_top - draw_h
         x_logo = (width - draw_w) / 2.0
@@ -203,18 +241,14 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
             preserveAspectRatio=True,
             mask="auto",
         )
-
-        # Text can start a bit below the logo
         text_top_limit = y_logo - 2.0 * mm
     else:
-        # If logo missing, text area starts below the safe_top zone
         text_top_limit = logo_bottom_y_for_text
 
-    # ---------- ICONS (BOTTOM, ABOVE SAFE MARGIN) ----------
-    icons_max_height = (icons_band_mm - 2.0) * mm   # smaller icons
+    # Icons
+    icons_max_height = (icons_band_mm - 2.0) * mm
     icons_max_width = width - 2 * inner_margin_x
 
-    # text_bottom_limit is "just above icons"
     if CARE_ICONS_PATH.exists():
         icons_img = ImageReader(str(CARE_ICONS_PATH))
         iw, ih = icons_img.getSize()
@@ -222,7 +256,6 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
         draw_w_i = iw * scale_i
         draw_h_i = ih * scale_i
 
-        # Place icons just above the safe_bottom_y
         gap_from_safe_bottom = 1.0 * mm
         y_icons = safe_bottom_y + gap_from_safe_bottom
         x_icons = (width - draw_w_i) / 2.0
@@ -236,27 +269,21 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
             preserveAspectRatio=True,
             mask="auto",
         )
-
         text_bottom_limit = y_icons + draw_h_i + 2.0 * mm
     else:
-        # If no icons, keep a band at the bottom anyway
         text_bottom_limit = safe_bottom_y + icons_band_mm * mm
 
-    # ---------- TEXT (MIDDLE, WRAPPED + VERTICALLY CENTERED) ----------
-    font_size = 4.0         # smaller text
-    leading = 5.0           # line spacing in points
+    # Text (wrapped + vertically centered)
+    font_size = 4.0
+    leading = 5.0
     max_text_width = width - 2 * inner_margin_x
 
-    # Wrap each logical line so it fits in max_text_width
-    logical_lines = full_text.splitlines()
     wrapped_lines = []
-    for line in logical_lines:
+    for line in full_text.splitlines():
         if not line.strip():
             wrapped_lines.append("")
         else:
-            wrapped_lines.extend(
-                wrap_line(line, max_text_width, "Helvetica", font_size)
-            )
+            wrapped_lines.extend(wrap_line(line, max_text_width, "Helvetica", font_size))
 
     n_lines = len(wrapped_lines) if wrapped_lines else 1
     text_height = max((n_lines - 1), 0) * leading
@@ -266,14 +293,11 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
     available_height = available_top - available_bottom
 
     if available_height <= 0:
-        # Degenerate case – just start at top limit
         y_start = available_top
     else:
         if text_height >= available_height:
-            # Text does not fit nicely, top-align in available area
             y_start = available_top
         else:
-            # Vertically center the text block in [available_bottom, available_top]
             y_start = available_top - (available_height - text_height) / 2.0
 
     text_obj = c.beginText()
@@ -282,12 +306,12 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
     text_obj.setTextOrigin(inner_margin_x, y_start)
 
     for line in wrapped_lines:
-        # Safety check (should not happen when centered)
         if text_obj.getY() <= text_bottom_limit:
             break
         text_obj.textLine(line)
 
     c.drawText(text_obj)
+
     c.showPage()
     c.save()
 
@@ -299,8 +323,7 @@ def create_carelabel_pdf(brand: str, full_text: str) -> bytes:
 def create_sku_labels_pdf(skus) -> bytes:
     """
     Multi-page PDF for SKU labels.
-    Each page = 50 x 10 mm, border, SKU centered.
-    (Keeping the box here unless you say otherwise.)
+    Each page = 50 x 10 mm, NO box line, SKU centered, font size increased by 2pt.
     """
     width = 50 * mm
     height = 10 * mm
@@ -308,24 +331,19 @@ def create_sku_labels_pdf(skus) -> bytes:
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=(width, height))
 
+    sku_font_size = 12  # was 10, now +2pt
+
     for sku in skus:
         sku = sku.strip()
         if not sku:
             continue
 
-        # Border (SKU label)
-        border_margin = 0.5 * mm
-        c.setLineWidth(0.5)
-        c.rect(
-            border_margin,
-            border_margin,
-            width - 2 * border_margin,
-            height - 2 * border_margin,
-        )
+        # No border rectangle (removed)
 
-        # SKU centered
-        c.setFont("Helvetica", 10)
-        c.drawCentredString(width / 2.0, height / 2.0 - 3, sku)
+        # Centered SKU
+        c.setFont("Helvetica", sku_font_size)
+        # Slight vertical optical adjustment
+        c.drawCentredString(width / 2.0, height / 2.0 - (sku_font_size * 0.30), sku)
 
         c.showPage()
 
@@ -338,10 +356,6 @@ def create_sku_labels_pdf(skus) -> bytes:
 # ---------------- HTML PREVIEWS (UI ONLY) ----------------
 
 def carelabel_preview_html(full_text: str, brand: str) -> str:
-    """
-    Carelabel preview (approximate on-screen view).
-    No border box, to reflect final print.
-    """
     logo_b64 = BRAND_LOGOS_B64.get(brand)
     icons_b64 = CARE_ICONS_B64
 
@@ -380,19 +394,16 @@ def carelabel_preview_html(full_text: str, brand: str) -> str:
 
 
 def sku_label_preview_html(sku: str) -> str:
-    """
-    Simple bordered horizontal SKU preview.
-    """
+    # Preview without border, and slightly bigger
     return f"""
     <div style="
-        border:1px solid #000;
         width:300px;
         height:60px;
         display:flex;
         align-items:center;
         justify-content:center;
         font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-        font-size:20px;
+        font-size:22px;
         letter-spacing:2px;
         margin-bottom:8px;
         ">
@@ -409,8 +420,8 @@ brand = st.sidebar.selectbox("Brand", list(BRAND_LOGOS.keys()))
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "Carelabel PDF: 80×30 mm (vertical, com margens para costura, sem box).\n"
-    "SKU labels PDF: 10×50 mm (horizontal, 1 SKU por página)."
+    "Carelabel PDF: 80×30 mm (vertical, margens para costura, sem box).\n"
+    "SKU labels PDF: 10×50 mm (horizontal, 1 SKU por página, sem box, fonte maior)."
 )
 
 
@@ -457,7 +468,6 @@ with tab_care:
         st.subheader("Preview & PDF")
 
         if generate_care:
-            # Store family in session for optional use in SKU tab
             st.session_state["family_code"] = family_code.strip()
 
             if already_pt:
@@ -469,13 +479,11 @@ with tab_care:
 
             full_text = build_carelabel_text(exterior_pt, forro_pt)
 
-            # HTML preview
             st.markdown(
                 carelabel_preview_html(full_text, brand),
                 unsafe_allow_html=True,
             )
 
-            # PDF
             pdf_bytes = create_carelabel_pdf(brand, full_text)
             pdf_name_base = family_code.strip() or "CARELABEL"
             st.download_button(
@@ -491,14 +499,13 @@ with tab_care:
 # ---- SKU LABELS TAB ----
 with tab_sku:
     if "sku_count" not in st.session_state:
-        st.session_state["sku_count"] = 4  # start with 4 fields
+        st.session_state["sku_count"] = 4
 
     col_left, col_right = st.columns([1.1, 1.6])
 
     with col_left:
         st.subheader("SKUs para esta carelabel")
 
-        # Suggest family from carelabel tab, if filled
         default_family = st.session_state.get("family_code", "")
         family_code_sku = st.text_input(
             "Product family (para nome do PDF)",
@@ -528,11 +535,9 @@ with tab_sku:
             if not sku_values:
                 st.warning("Informe pelo menos um SKU.")
             else:
-                # HTML previews
                 for sku in sku_values:
                     st.markdown(sku_label_preview_html(sku), unsafe_allow_html=True)
 
-                # PDF
                 sku_pdf = create_sku_labels_pdf(sku_values)
                 sku_pdf_name = family_code_sku.strip() or "SKUS"
                 st.download_button(
@@ -542,7 +547,4 @@ with tab_sku:
                     mime="application/pdf",
                 )
         else:
-            st.info(
-                "Digite os SKUs (vários, se quiser) e clique em "
-                "**Generate SKU labels PDF**."
-            )
+            st.info("Digite os SKUs e clique em **Generate SKU labels PDF**.")
